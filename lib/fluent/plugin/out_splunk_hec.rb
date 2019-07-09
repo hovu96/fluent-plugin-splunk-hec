@@ -6,6 +6,8 @@ require "fluent/plugin/formatter"
 require 'openssl'
 require 'multi_json'
 require 'net/http/persistent'
+require 'json'
+require 'securerandom'
 
 module Fluent::Plugin
   class SplunkHecOutput < Fluent::Plugin::Output
@@ -65,6 +67,9 @@ module Fluent::Plugin
 
     desc 'Type of data sending to Splunk, `event` or `metric`. `metric` type is supported since Splunk 7.0. To use `metric` type, make sure the index is a metric index.'
     config_param :data_type, :enum, list: %i[event metric], default: :event
+
+    desc 'When `data_type` is set to `event`, by default it will send data to the "services/collector" endpoint. Set `use_raw_endpoint_for_events` to `false` to data to the "services/collector/raw" endpoint instead.'
+    config_param :use_raw_endpoint_for_events, :bool, default: false
 
     desc 'The Splunk index to index events. When not set, will be decided by HEC. This is exclusive with `index_key`'
     config_param :index, :string, default: nil
@@ -134,6 +139,7 @@ module Fluent::Plugin
       super
       @default_host = Socket.gethostname
       @extra_fields = nil
+      @rawEndpointChannelID = SecureRandom.uuid
     end
 
     def configure(conf)
@@ -141,10 +147,11 @@ module Fluent::Plugin
 
       check_conflict
       check_metric_configs
-      construct_api
+      construct_event_api
       prepare_key_fields
       configure_fields(conf)
       pick_custom_format_method
+      pick_custom_send_to_hec_method
 
       # @formatter_configs is from formatter helper
       @formatters = @formatter_configs.map { |section|
@@ -322,7 +329,7 @@ module Fluent::Plugin
       payloads.map!(&MultiJson.method(:dump)).join
     end
 
-    def construct_api
+    def construct_event_api
       @hec_api = URI("#{@protocol}://#{@hec_host}:#{@hec_port}/services/collector")
     rescue
       raise Fluent::ConfigError, "hec_host (#{@hec_host}) and/or hec_port (#{@hec_port}) are invalid."
@@ -346,7 +353,19 @@ module Fluent::Plugin
       end
     end
 
+    def pick_custom_send_to_hec_method
+      if @data_type == :event && @use_raw_endpoint_for_events == true
+        define_singleton_method :send_to_hec, method(:send_to_raw_hec)
+      else
+        define_singleton_method :send_to_hec, method(:send_to_event_hec)
+      end
+    end
+
     def send_to_hec(chunk)
+      # this method will be replaced in `configure`
+    end
+
+    def send_to_event_hec(chunk)
       post = Net::HTTP::Post.new @hec_api.request_uri
       post.body = chunk.read
       log.debug { "Sending #{post.body.bytesize} bytes to Splunk." }
@@ -364,6 +383,65 @@ module Fluent::Plugin
 	log.error "Failed POST to #{@hec_api}, response: #{response.body}"
 	log.debug { "Failed request body: #{post.body}" }
       end
+    end
+
+    def send_to_raw_hec(chunk)
+      # https://docs.fluentd.org/plugin-development/api-plugin-output#write-chunk
+
+      # split into individual events
+      all = chunk.read
+      all.gsub!("}{", "}|||{")
+      events = all.split("|||")
+      
+      # group events by combination of some metadata (sourcetype, host, index and source)
+      groups = {}
+      sourcetypes = {}
+      sources = {}
+      indexes = {}
+      hosts = {}
+      events.each do |event|
+        event_json = JSON.parse(event)
+        sourcetype = event_json["sourcetype"]
+        host = event_json["host"]
+        index = event_json["index"]
+        source = event_json["source"]
+        event = event_json["event"]
+        key = "#{sourcetype}-#{host}-#{index}-#{source}"
+        if groups.key?(key)
+          groups[key].push(event)
+        else
+          sourcetypes[key] = sourcetype
+          sources[key] = source
+          indexes[key] = index
+          hosts[key] = host
+          groups[key] = [event]
+        end
+      end
+
+      # iterate over group of events and send to HEC
+      groups.each do |key, group|
+        rawText = group.join("\n")
+        sourcetype = sourcetypes[key]
+        source = sources[key]
+        index = indexes[key]
+        host = hosts[key]
+
+        uri = URI("#{@protocol}://#{@hec_host}:#{@hec_port}/services/collector/raw?channel=#{@rawEndpointChannelID}&sourcetype=#{sourcetype}&source=#{source}&index=#{index}&host=#{host}")
+        post = Net::HTTP::Post.new uri.request_uri
+        post.body = rawText
+  
+        log.trace { "POST #{uri} body=#{post.body}" }
+        response = @hec_conn.request uri, post
+        log.debug { "[Response] POST #{uri}: #{response.inspect}" }
+  
+        raise "Server error (#{response.code}) for POST #{uri}, response: #{response.body}" if response.code.start_with?('5')
+        if not response.code.start_with?('2')
+          log.error "Failed POST to #{uri}, response: #{response.body}"
+          log.debug { "Failed request body: #{post.body}" }
+        end
+  
+      end
+
     end
 
     # Encode as UTF-8. If 'coerce_to_utf8' is set to true in the config, any
