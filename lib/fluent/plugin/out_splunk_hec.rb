@@ -355,10 +355,10 @@ module Fluent::Plugin
 
     def pick_custom_send_to_hec_method
       if @data_type == :event && @use_raw_endpoint_for_events == true
-        log.error "send_to_raw_hec"
+        log.error { "send_to_raw_hec" }
         define_singleton_method :send_to_hec, method(:send_to_raw_hec)
       else
-        log.error "send_to_event_hec"
+        log.error { "send_to_event_hec" }
         define_singleton_method :send_to_hec, method(:send_to_event_hec)
       end
     end
