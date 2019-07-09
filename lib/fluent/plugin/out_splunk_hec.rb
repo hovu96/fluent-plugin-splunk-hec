@@ -69,7 +69,7 @@ module Fluent::Plugin
     config_param :data_type, :enum, list: %i[event metric], default: :event
 
     desc 'When `data_type` is set to `event`, by default it will send data to the "services/collector" endpoint. Set `use_raw_endpoint_for_events` to `false` to data to the "services/collector/raw" endpoint instead.'
-    config_param :use_raw_endpoint_for_events, :bool, default: false
+    config_param :use_raw_endpoint_for_events, :bool, default: true
 
     desc 'The Splunk index to index events. When not set, will be decided by HEC. This is exclusive with `index_key`'
     config_param :index, :string, default: nil
