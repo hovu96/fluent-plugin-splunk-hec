@@ -359,7 +359,8 @@ module Fluent::Plugin
         define_singleton_method :send_to_hec, method(:send_to_raw_hec)
       else
         log.error { "send_to_event_hec" }
-        define_singleton_method :send_to_hec, method(:send_to_event_hec)
+        define_singleton_method :send_to_hec, method(:send_to_raw_hec)
+        #define_singleton_method :send_to_hec, method(:send_to_event_hec)
       end
     end
 
